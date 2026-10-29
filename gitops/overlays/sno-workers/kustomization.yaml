@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Disposable Single Node OpenShift — confidential workers (control+worker collapsed).
+resources:
+  - ../../base/operators
+  - ../../base/nfd          # NFD instance + TEE NodeFeatureRule — must precede KataConfig (CoCo TEE detection)
+  - ../../base/kataconfig
+  - ../../base/gatekeeper   # OPA Gatekeeper + CoCo memory-resource Assign mutation (apply order: operator->CR->Assign)
+  - ../../base/workloads
+# Staged SNO installation requires INSTALL_TOPOLOGY=sno TRUSTEE_LAB=1.
+# Workload scripts render environment-specific initdata; see docs/guest-images.md.

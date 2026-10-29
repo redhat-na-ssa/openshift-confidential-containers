@@ -1,0 +1,52 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Customer multi-node confidential workers (air-gapped). Driven by mirrored ArgoCD.
+# Same components as the staged installer (scripts/apply-sno.sh) applies for the
+# customer topology; Trustee is removed below because it runs in its own cluster.
+resources:
+  - ../../base/operators
+  - ../../base/nfd          # emits the SNP node label the KataConfig pool selector needs
+  - ../../base/kataconfig
+  - ../../base/gatekeeper   # CoCo memory guard the shipped workloads rely on
+  - ../../base/workloads
+# Hardware discovery alone does not authorize a runtime rollout to every SNP node.
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: trustee-operator-system
+  - patch: |-
+      $patch: delete
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: trustee-operator-group
+        namespace: trustee-operator-system
+  - patch: |-
+      $patch: delete
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: trustee-operator
+        namespace: trustee-operator-system
+  - target:
+      kind: KataConfig
+      name: cluster-kataconfig
+    patch: |-
+      - op: replace
+        path: /spec/kataConfigPoolSelector
+        value:
+          matchLabels:
+            amd.feature.node.kubernetes.io/snp: "true"
+            node-role.kubernetes.io/coco-snp: ""
+  - target:
+      kind: Pod
+    patch: |-
+      - op: add
+        path: /spec/nodeSelector
+        value:
+          amd.feature.node.kubernetes.io/snp: "true"
+          node-role.kubernetes.io/coco-snp: ""
+# Configure mirror rewrites and external Trustee initdata before customer use.

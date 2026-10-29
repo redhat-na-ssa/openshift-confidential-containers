@@ -1,0 +1,302 @@
+---
+# Prepare supplied private-network infrastructure, then explicitly install and verify.
+# up.sh --mode fresh-install checks the node and asks once before it is erased.
+
+# Validate the controller's release inputs before any selected preparation/install writes.
+# Cleanup stays available even when the BOM is unresolved. Verify mode reads cluster state only.
+- name: Validate the selected release before preparation or installation
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  tags: [bastion-prep, tools, mirror, dns, dns-ntp, isolation, render, pxe, drive, install, api-resolver]
+  tasks:
+    - name: Require the supported provider and private network
+      ansible.builtin.assert:
+        that:
+          - infra_provider == 'cherry'
+          - network_profile == 'private-vlan'
+        fail_msg: "Only supplied Cherry rigs on private-vlan are supported."
+
+    - name: Validate the effective Ansible release and profile inputs
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/verify-release.py"
+          - --manifest
+          - "{{ release_manifest_absolute }}"
+          - --tee
+          - "{{ tee }}"
+      environment:
+        OCP_VERSION: "{{ ocp_version }}"
+        OCP_RELEASE_IMAGE: "{{ ocp_release_image }}"
+        IMAGESET_CONFIG: "{{ imageset_config_absolute }}"
+      changed_when: false
+
+    - name: Require resolved catalog and artifact identities
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/verify-release.py"
+          - --manifest
+          - "{{ release_manifest_absolute }}"
+          - --tee
+          - "{{ tee }}"
+          - --require-resolved
+      environment:
+        OCP_VERSION: "{{ ocp_version }}"
+        OCP_RELEASE_IMAGE: "{{ ocp_release_image }}"
+        IMAGESET_CONFIG: "{{ imageset_config_absolute }}"
+      changed_when: false
+      when: (install_mode | default('fresh')) != 'verify'
+
+# =====================================================================================
+# PHASE A — Bastion preparation (tools -> mirror push -> dns/ntp).
+# Start with an allocated helper whose mirror bootstrap has completed.
+# =====================================================================================
+- name: "Phase A — bastion preparation (tools, mirror, dns/ntp)"
+  hosts: bastions
+  # A new server can be reported as running before SSH accepts connections.
+  # Automatic setup runs before pre_tasks, so gather only after the wait below.
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  # Wait for SSH and the protected mirror readiness marker before using registry inputs.
+  pre_tasks:
+    - name: Wait for the bastion to accept SSH (fresh cloud-init boot)
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ bastion_ssh_wait_timeout | default(900) }}"
+      tags: [bastion-prep, tools, mirror, dns, dns-ntp]
+
+    - name: Gather bastion facts after SSH is ready
+      ansible.builtin.setup:
+      tags: [bastion-prep, tools, mirror, dns, dns-ntp]
+
+    - name: Wait for the first-boot mirror bootstrap to settle
+      ansible.builtin.shell: |
+        set -o pipefail
+        if [ -f {{ mirror_root }}/MIRROR_FAILED ]; then echo FAILED
+        elif [ -f {{ mirror_root }}/MIRROR_READY ]; then echo READY
+        else echo PENDING; fi
+      args:
+        executable: /bin/bash
+      # Bootstrap protects /opt/mirror with mode 0700; the SSH login cannot
+      # distinguish an inaccessible READY marker from one that is absent.
+      become: true
+      register: mirror_bootstrap_state
+      changed_when: false
+      retries: "{{ mirror_bootstrap_retries | default(160) }}"
+      delay: "{{ mirror_bootstrap_delay | default(15) }}"
+      until: mirror_bootstrap_state.stdout != 'PENDING'
+      tags: [bastion-prep, tools, mirror, dns, dns-ntp]
+
+    - name: Fail closed if the mirror bootstrap did not succeed
+      ansible.builtin.assert:
+        that: mirror_bootstrap_state.stdout == 'READY'
+        fail_msg: >-
+          Bastion mirror bootstrap did not complete: {{ mirror_root }}/MIRROR_FAILED is present
+          (or the marker never appeared within
+          {{ (mirror_bootstrap_retries | default(160) | int) * (mirror_bootstrap_delay | default(15) | int) }}s).
+          cloud-init does NOT re-run on its own — inspect /var/log/mirror-bootstrap.log on the
+          bastion, then re-run /usr/local/bin/bootstrap-mirror.sh before retrying this phase.
+        success_msg: "mirror bootstrap READY — safe to prep the bastion"
+      tags: [bastion-prep, tools, mirror, dns, dns-ntp]
+  roles:
+    - role: mirror_tools     # tools to /usr/local/bin, trust CA, nmstate, merged docker config
+      tags: [tools, bastion-prep]
+    - role: mirror_push  # oc-mirror v2 push with resume-on-retry
+      tags: [mirror, bastion-prep]
+    - role: dns_ntp  # cluster dnsmasq records + chrony allow
+      tags: [dns, dns-ntp, bastion-prep]
+    - role: bastion_isolation
+      tags: [isolation, bastion-prep]
+      when: bastion_node_isolation_enabled | default(false) | bool
+
+# =====================================================================================
+# STOP-GATE — check this node, then confirm the erase, before its destructive reinstall.
+# up.sh --mode fresh-install runs this first, so the one question comes before the long
+# helper preparation. Firmware security fixes are not checked here; see
+# docs/amd-firmware-preflight.md.
+# =====================================================================================
+- name: "STOP — check the AMD node and confirm the erase before continuing"
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  tags: [bios, install]
+  vars:
+    install_machine: "{{ machines[0] }}"
+    gate_server_id: "{{ machines[0].server_id | string }}"
+  tasks:
+    - name: Refuse the retired BIOS bypass
+      ansible.builtin.assert:
+        that: skip_bios_pause is not defined
+        fail_msg: >-
+          skip_bios_pause was replaced: the node checks now always run. To answer the
+          erase question ahead, for a run without a terminal, add
+          -e confirm_erase=<the node's server ID>.
+
+    - name: Require one node and pinned SSH inputs
+      ansible.builtin.assert:
+        that:
+          - machines | length == 1
+          - gate_server_id is match('^[1-9][0-9]*$')
+          - raw_node_ssh_user | default('') is match('^[a-z_][a-z0-9_-]*[$]?$')
+          - raw_node_ssh_key | default('') is match('^/[^\s]+$')
+          - private_link_known_hosts | default('') is match('^/[^\s]+$')
+          - install_machine.root_device | default('') is match('^/dev/')
+        fail_msg: >-
+          The node checks need one node, raw_node_ssh_user, raw_node_ssh_key,
+          private_link_known_hosts and node_root_device from the rig file.
+
+    - name: Read and validate the node's provider identity
+      ansible.builtin.import_tasks: ../roles/install_drive/tasks/provider_identity.yml
+
+    # Read-only: identity, boot mode, the install disk and scripts/host-snp-check.sh.
+    - name: Check the node's identity, UEFI boot, install disk and SEV-SNP over pinned SSH
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/node-preflight.py"
+          - --address
+          - "{{ provider_identity.public_ipv4 }}"
+          - --user
+          - "{{ raw_node_ssh_user }}"
+          - --key
+          - "{{ raw_node_ssh_key }}"
+          - --known-hosts
+          - "{{ private_link_known_hosts }}"
+          - --server-id
+          - "{{ gate_server_id }}"
+          - --hostname
+          - "{{ provider_identity.hostname | default('') }}"
+          - --root-device
+          - "{{ install_machine.root_device | default('') }}"
+          - --evidence-dir
+          - >-
+            {{ lookup('ansible.builtin.env', 'COCO_STATE_DIR')
+               | default(lookup('ansible.builtin.env', 'HOME') ~ '/.local/state/openshift-confidential-containers', true) }}/evidence
+      register: node_preflight
+      changed_when: false
+      failed_when: false
+
+    - name: Read the node check results
+      ansible.builtin.set_fact:
+        node_report: >-
+          {{ node_preflight.stdout | from_json if node_preflight.stdout.startswith('{')
+             else {'passed': false, 'lines': [], 'evidence': '',
+                   'problems': [node_preflight.stderr | default('', true) | trim or 'node-preflight.py failed']} }}
+
+    - name: Show the SEV-SNP host check output when it did not pass
+      ansible.builtin.debug:
+        msg: "{{ node_report.snp_output | default('') | split('\n') }}"
+      when: not node_report.passed and node_report.snp_output | default('') | length > 0
+
+    - name: Show the node checks
+      ansible.builtin.debug:
+        msg: "{{ node_report.lines + ['Evidence: ' ~ node_report.evidence] }}"
+      when: node_report.lines | length > 0
+
+    - name: Stop when any node check failed
+      ansible.builtin.assert:
+        that: node_preflight.rc == 0 and node_report.passed
+        fail_msg: >-
+          Stopped because {{ node_report.problems | join('; ') }}. Nothing was changed.
+          Evidence: {{ node_report.evidence or 'not saved' }}. Check the BIOS (docs/cherry-servers.md#set-the-bios) and the rig file, then run this again.
+        success_msg: "All node checks passed for {{ gate_server_id }}"
+
+    - name: Ask once before erasing the node
+      ansible.builtin.pause:
+        prompt: |
+
+          ====================================================================
+          Node {{ gate_server_id }} passed the checks above.
+          Installing OpenShift erases its install disk,
+            {{ install_machine.root_device }}
+            ({{ node_report.lines | select('match', '  = ') | first | default('') | regex_replace('^  = ', '') }}),
+          and replaces the node's operating system. Firmware security fixes
+          are not checked; see docs/amd-firmware-preflight.md#review-firmware-security.
+          ====================================================================
+
+          Type the node's server ID, {{ gate_server_id }}, to erase it and install
+          OpenShift. Anything else stops here. (Ctrl-C then A also stops.)
+      register: erase_ack
+      when: confirm_erase | default('') | string != gate_server_id
+
+    # ansible.builtin.pause WARNS AND FALLS THROUGH when stdin is not a TTY, so under nohup,
+    # CI or `| tee` the question above is silently skipped. A typed server ID, not ENTER,
+    # so a stray newline on a half-attached stdin cannot satisfy it, and an answer given
+    # ahead with -e confirm_erase only counts for this node.
+    - name: Fail closed unless the erase was confirmed for this node
+      ansible.builtin.assert:
+        that: >-
+          confirm_erase | default('') | string == gate_server_id
+          or erase_ack.user_input | default('') | trim == gate_server_id
+        fail_msg: >-
+          The erase of node {{ gate_server_id }} was not confirmed, so nothing was changed.
+          Without a terminal the question cannot be asked: run this from a terminal, or add
+          -e confirm_erase={{ gate_server_id }} after reading the checks above.
+        success_msg: "Erase of node {{ gate_server_id }} confirmed"
+
+# =====================================================================================
+# PHASE B — Verify allocated Cherry identity and NICs through pinned SSH.
+# Save only current MAC bindings in external state.
+# =====================================================================================
+- name: "Phase B — discover Cherry node interface MACs"
+  ansible.builtin.import_playbook: discover.yml
+  tags: [discover, install]
+
+# =====================================================================================
+# PHASE C — Render configs -> serve boot artifacts -> reinstall+wait. Runs on the bastion.
+# Validated MAC bindings from Phase B fill missing MACs in the current machine inputs.
+# =====================================================================================
+- name: "Phase C — render configs, serve boot artifacts, drive the install"
+  hosts: bastions
+  gather_facts: true
+  vars_files:
+    - ../group_vars/all.yml
+  pre_tasks:
+    # Run on the controller, where COCO_STATE_DIR and discovery evidence live.
+    # A separate output variable also supports `-e machines=...`: Ansible extra
+    # vars cannot be overridden by set_fact, and current install inputs must win.
+    - name: Validate cached identities and merge MACs into current machine inputs
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/discover-node-macs.py"
+          - merge
+        stdin: "{{ {'machines': machines} | to_json }}"
+      delegate_to: localhost
+      become: false
+      register: discovery_merge
+      changed_when: false
+      tags: [render, install]
+
+    - name: Use the validated machine inputs for rendering
+      ansible.builtin.set_fact:
+        discovery_machines: "{{ discovery_merge.stdout | from_json }}"
+      tags: [render, install]
+  roles:
+    - role: render_configs  # install-config + agent-config (additionalNTPSources in agent)
+      tags: [render, install]
+    - role: pxe_serve  # build pxe-files, tokenized nginx serve, verify 206
+      tags: [pxe, install]
+    - role: install_drive  # reinstall netboot, wait-for, poll clusterversion
+      tags: [drive, install]
+    - role: public_console   # default-on public sslip.io console edge; opt out with public_console_enabled=false
+      tags: [console, public-console, install]
+
+# =====================================================================================
+# After install: close the boot-artifact endpoint (run explicitly: --tags pxe-stop, or the
+# Makefile `pxe-stop` target). The secret-bearing initrd must not stay public.
+# =====================================================================================
+- name: "Post-install — close the boot-artifact endpoint"
+  hosts: bastions
+  gather_facts: true
+  vars_files:
+    - ../group_vars/all.yml
+  tags: [pxe-stop, never]
+  roles:
+    - role: pxe_serve
+      vars:
+        pxe_mode: stop

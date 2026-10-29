@@ -1,0 +1,23 @@
+---
+# NodeFeatureDiscovery instance — REQUIRED for OSC Confidential Containers. The OSC operator
+# keys CoCo off TEE node labels (e.g. amd.feature.node.kubernetes.io/snp); those labels come
+# from NFD detecting the kernel-exposed SEV-SNP capability, then the NodeFeatureRule below
+# translating it. Installing the NFD *operator* alone is NOT enough — this instance starts the
+# nfd-master/nfd-worker that actually label nodes. (Gap found 2026-06-28: KataConfig hung with
+# "no TEE platform labels found" until this + amd-snp-rule.yaml were applied.)
+#
+# AIR-GAP: do NOT pin spec.operand.image. The NFD operator defaults the operand to its own
+# NODE_FEATURE_DISCOVERY_IMAGE — a registry.redhat.io/openshift4 DIGEST that the digest-based IDMS
+# redirects to the mirror, and that default always matches the mirrored operator version. A
+# hardcoded digest silently drifts per z-stream: if it isn't the exact one oc-mirror mirrored,
+# nfd-worker goes ImagePullBackOff -> no SEV-SNP label -> KataConfig never installs.
+apiVersion: nfd.openshift.io/v1
+kind: NodeFeatureDiscovery
+metadata:
+  name: nfd-instance
+  namespace: openshift-nfd
+spec:
+  operand:
+    # No image pin: the NFD operator uses its own default operand digest (mirrored, IDMS-redirected).
+    imagePullPolicy: IfNotPresent
+    servicePort: 12000

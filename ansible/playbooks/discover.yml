@@ -1,0 +1,22 @@
+---
+- name: Discover and verify provider node interfaces
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  tasks:
+    - name: Require the supported supplied provider before discovery
+      ansible.builtin.assert:
+        that: infra_provider | default('cherry') == 'cherry'
+        fail_msg: "Only supplied Cherry rigs are supported."
+    - name: Validate requested identities and invalidate previous MAC discovery
+      ansible.builtin.command:
+        argv:
+          - python3
+          - '{{ playbook_dir }}/../../scripts/discover-node-macs.py'
+          - begin
+        stdin: '{{ {''machines'': machines} | to_json }}'
+      register: discovery_begin
+      changed_when: discovery_begin.rc == 0 and (discovery_begin.stdout | from_json).changed
+    - name: Discover Cherry bond identities through pinned SSH
+      ansible.builtin.include_tasks: tasks/discovery-cherry.yml

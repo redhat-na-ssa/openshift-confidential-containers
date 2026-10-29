@@ -1,0 +1,19 @@
+# make order-rig writes $COCO_STATE_DIR/cherry.tfvars from your answers. To write
+# it by hand instead, copy this file outside the checkout and fill in every REPLACE
+# value; "What make order-rig chooses" in docs/cherry-servers.md explains them, and
+# make cherry-plans lists the tested plans in stock with their hourly prices.
+
+project_id   = 0 # REPLACE with the project ID
+region       = "REPLACE_WITH_REGION_SLUG"
+node_plan    = "REPLACE_WITH_AMD_SNP_PLAN_SLUG"
+node_image   = "REPLACE_WITH_NODE_IMAGE_SLUG"
+helper_plan  = "REPLACE_WITH_HELPER_PLAN_SLUG"
+helper_image = "REPLACE_WITH_RHEL9_FAMILY_IMAGE_SLUG"
+
+# Registered for both servers. If the key is already in your Cherry account, delete
+# this line and give its numeric ID instead (portal SSH Keys page, or GET /v1/ssh-keys).
+ssh_public_key_file = "/path/outside/checkout/rig-ssh-key.pub"
+# ssh_key_ids = ["1234"]
+
+# node_hostname   = "sno-coco-node"
+# helper_hostname = "sno-coco-helper"

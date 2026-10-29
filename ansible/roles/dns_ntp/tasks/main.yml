@@ -1,0 +1,110 @@
+---
+# dns_ntp
+# cloud-init only lays the mirror.rig.local base dnsmasq record + chrony allow. This role adds
+# the CLUSTER dnsmasq records (api / api-int host-records + address=/apps.../ wildcard -> node)
+# and re-asserts the chrony allow {{ vlan_cidr }} + local stratum 10, all idempotent.
+
+- name: Ensure dnsmasq and the DNS query tool are installed
+  ansible.builtin.package:
+    name: [dnsmasq, bind-utils]
+    state: present
+  become: true
+
+- name: Lay the cluster dnsmasq records (api/api-int host-records + apps wildcard)
+  ansible.builtin.template:
+    src: dnsmasq-cluster.conf.j2
+    dest: /etc/dnsmasq.d/rig-cluster.conf
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Restart dnsmasq
+
+- name: Configure and validate private rig NTP
+  ansible.builtin.include_tasks: chrony.yml
+
+- name: Ensure the dnsmasq systemd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/dnsmasq.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Make dnsmasq survive the VLAN race across reboots
+  ansible.builtin.template:
+    src: dnsmasq-vlan-race.conf.j2
+    dest: /etc/systemd/system/dnsmasq.service.d/10-wait-for-vlan.conf
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Restart dnsmasq
+
+# `ansible_facts.services` is NOT populated unless service_facts has actually run (the audit
+# caught this: the firewalld task below could never fire, so it silently no-opped every run).
+# Collect them explicitly rather than gating on a fact nobody gathered.
+- name: Collect service facts (needed for the firewalld gate below)
+  ansible.builtin.service_facts:
+  become: true
+
+- name: Open private DNS and NTP in firewalld (if active)
+  ansible.builtin.command: "{{ item }}"
+  become: true
+  register: dnsntp_fw
+  changed_when: "'success' in (dnsntp_fw.stdout | default(''))"
+  loop:
+    - firewall-cmd --permanent --add-service=dns
+    - firewall-cmd --permanent --add-service=ntp
+    - firewall-cmd --reload
+  when: (ansible_facts.services['firewalld.service'] | default({})).state | default('') == 'running'
+
+# Flush now so the verification below tests the RUNNING daemon, not the pre-change one.
+- name: Apply pending dnsmasq/chrony restarts before verifying
+  ansible.builtin.meta: flush_handlers
+
+# The whole air gap depends on this one daemon answering. `systemctl is-active` is NOT proof:
+# dnsmasq can be active-but-wrong, and the failure mode is silent (the node simply cannot resolve
+# the mirror and the install parks). Assert on a REAL query against the address the NODE will
+# use, so a broken resolver fails Phase A loudly instead of surfacing an hour later as a
+# mysterious "Cannot access Rendezvous Host". getent would
+# accept the bastion's /etc/hosts entries without sending any DNS query.
+- name: Query the mirror and cluster names through the VLAN DNS server
+  ansible.builtin.command:
+    argv:
+      - dig
+      - "@{{ bastion_vlan_ip }}"
+      - "{{ item.name }}"
+      - A
+      - +short
+      - +time=2
+      - +tries=1
+  become: true
+  register: dnsntp_resolve
+  changed_when: false
+  retries: "{{ dnsmasq_verify_retries | default(12) }}"
+  delay: "{{ dnsmasq_verify_delay | default(5) }}"
+  until: dnsntp_resolve.rc == 0 and item.address in dnsntp_resolve.stdout_lines
+  failed_when: false
+  loop:
+    - {name: "{{ mirror_dns_name }}", address: "{{ bastion_vlan_ip }}"}
+    - {name: "api.{{ cluster_name }}.{{ base_domain }}", address: "{{ node_vlan_ip }}"}
+    - {name: "api-int.{{ cluster_name }}.{{ base_domain }}", address: "{{ node_vlan_ip }}"}
+    - {name: "coco-dns-probe.apps.{{ cluster_name }}.{{ base_domain }}", address: "{{ node_vlan_ip }}"}
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Fail closed if a required VLAN DNS answer is missing
+  ansible.builtin.assert:
+    that: item.rc == 0 and item.item.address in item.stdout_lines
+    fail_msg: >-
+      {{ item.item.name }} did not resolve to {{ item.item.address }} through DNS server
+      {{ bastion_vlan_ip }}. The disconnected node depends on this DNS path. Check
+      `systemctl status dnsmasq` and `journalctl -u dnsmasq`: an "unknown interface" error means
+      it started before the VLAN child existed. Got rc={{ item.rc }},
+      stdout={{ item.stdout | default('') | trim }}
+    success_msg: "{{ item.item.name }} resolves to {{ item.item.address }} through {{ bastion_vlan_ip }}"
+  loop: "{{ dnsntp_resolve.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"

@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# OPT-IN egress lockdown — deliberately NOT referenced by the sno-workers / customer-workers
+# overlays (applying it during/just-after install can wedge the cluster). Apply it on its own,
+# AFTER the cluster is healthy:  oc apply -k gitops/base/airgap-egress
+#   SNO (rig): role=master is correct (control+worker collapsed) — apply as-is.
+#   Multi-node customer: FIRST flip role: master->worker in machineconfig-airgap-egress.yaml
+#   (line ~20), or it locks the control plane instead of the SNP worker pool.
+# This policy filters host OUTPUT; it does not establish Trustee pod or guest isolation.
+# Before any air-gap proof, inspect effective rules and attribute fresh public-connection
+# denials to enforcement from the host, Trustee and relevant workload/guest contexts. A failed
+# curl caused by DNS, TLS or routing is insufficient. Verify working private mirror TLS,
+# DNS/NTP and cluster health; repeat after reinstall/reboot. See docs/validation.md.
+# airgap-egress.nft documents the executable rules embedded (base64) in the MachineConfig,
+# with current validation guidance in its comments. It is not a kustomize resource.
+resources:
+  - machineconfig-airgap-egress.yaml

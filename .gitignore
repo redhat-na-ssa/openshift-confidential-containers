@@ -1,0 +1,42 @@
+# Secrets and hardware-bound artifacts: never commit
+pull-secret.json
+auth.json
+*.der
+*.pem
+adminPrivateKey
+publicKey
+vcek-bundle/
+rvps-*.yaml
+initdata-*.toml
+rung-image-artifacts/
+cosign.key
+cosign.pub
+*.tmp
+
+# Fetched tooling + install working dirs (large, regenerable — never commit)
+bin/
+cluster-assets/
+mirror/
+
+# Ansible — runtime-generated + local secret/vars files (never commit)
+ansible/group_vars/discovered.yml
+ansible/group_vars/secrets.yml
+ansible/group_vars/*.local.yml
+ansible/inventory/*.local.yml
+ansible/*.retry
+ansible/.vault-pass
+ansible/.ansible/
+
+# Secret-bearing local environment
+.env
+
+# Terraform working files: state and variables live in COCO_STATE_DIR
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# Local Python tooling
+__pycache__/
+*.py[cod]
+.venv/

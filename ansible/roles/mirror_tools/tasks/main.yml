@@ -1,0 +1,130 @@
+---
+# Installs pinned oc/kubectl/openshift-install/oc-mirror to /usr/local/bin, trusts the mirror CA,
+# installs nmstate (needed before `agent create pxe-files`), and builds the merged
+# /root/.docker/config.json (RH pull-secret + mirror creds). Idempotent.
+
+# A fresh bastion may receive the supplied pull secret directly from an external controller
+# path. Existing bastions can keep using pull_secret_remote_path without a controller copy.
+- name: Stage the supplied Red Hat pull secret on a fresh bastion
+  ansible.builtin.copy:
+    src: "{{ pull_secret_src }}"
+    dest: "{{ pull_secret_remote_path }}"
+    mode: "0600"
+  when: pull_secret_src | default('') | length > 0
+  no_log: true
+
+# Reuse the same verified installer as direct shell users. It checks archive and installed
+# binary hashes, so a pre-existing older oc/installer/mirror cannot satisfy a changed release.
+- name: Create a temporary tool staging directory
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: coco-tools
+  register: tools_tmp
+  changed_when: false
+
+- name: Install the requested OpenShift tool set
+  block:
+    - name: Stage the shared tool installer
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../scripts/install-tools.sh"
+        dest: "{{ tools_tmp.path }}/install-tools.sh"
+        mode: "0755"
+      changed_when: false
+
+    - name: Verify or replace the requested tools
+      ansible.builtin.command:
+        argv:
+          - bash
+          - "{{ tools_tmp.path }}/install-tools.sh"
+      environment:
+        OCP_VERSION: "{{ ocp_version }}"
+        OCP_CLIENTS_BASE: "{{ ocp_clients_base }}"
+        OCMIRROR_VARIANT: rhel9
+        BIN_DIR: "{{ local_bin }}"
+      become: true
+      register: tools_install
+      # install-tools.sh prints "tools verified in" when it reuses the set.
+      changed_when: "'Installed and verified' in tools_install.stdout"
+  always:
+    - name: Remove temporary tool staging directory
+      ansible.builtin.file:
+        path: "{{ tools_tmp.path }}"
+        state: absent
+      become: true
+      changed_when: false
+
+# --- nmstate: required before `openshift-install agent create pxe-files` ---
+- name: Ensure nmstate is installed (needed for agent create pxe-files)
+  ansible.builtin.package:
+    name: nmstate
+    state: present
+  become: true
+
+# --- Trust the mirror CA ---
+- name: Install the mirror CA into the system anchors
+  ansible.builtin.copy:
+    src: "{{ mirror_ca_path }}"
+    dest: /etc/pki/ca-trust/source/anchors/coco-mirror-rootCA.pem
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  register: ca_copy
+
+- name: Update the CA trust store
+  ansible.builtin.command: update-ca-trust
+  become: true
+  when: ca_copy.changed
+  changed_when: ca_copy.changed
+
+# --- Merged /root/.docker/config.json (RH pull-secret + mirror creds) ---
+- name: Read the mirror admin password
+  ansible.builtin.slurp:
+    src: "{{ mirror_password_path }}"
+  become: true
+  register: mirror_pw_slurp
+  no_log: true
+
+- name: Set the mirror auth fact (base64 user:pass)
+  ansible.builtin.set_fact:
+    mirror_auth_b64: "{{ (mirror_user ~ ':' ~ (mirror_pw_slurp.content | b64decode | trim)) | b64encode }}"
+  no_log: true
+
+- name: Confirm the RH pull-secret is staged on the bastion
+  ansible.builtin.stat:
+    path: "{{ pull_secret_remote_path }}"
+  register: pull_secret_stat
+
+- name: Fail if the RH pull-secret is missing
+  ansible.builtin.fail:
+    msg: "{{ pull_secret_remote_path }} missing — scp the Red Hat pull-secret to the bastion first (Phase 0)."
+  when: not pull_secret_stat.stat.exists
+
+- name: Read the RH pull-secret
+  ansible.builtin.slurp:
+    src: "{{ pull_secret_remote_path }}"
+  register: pull_secret_slurp
+  no_log: true
+
+- name: Ensure /root/.docker exists
+  ansible.builtin.file:
+    path: /root/.docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+
+- name: Build the merged docker config (RH pull-secret + mirror creds)
+  ansible.builtin.copy:
+    content: >-
+      {{ (pull_secret_slurp.content | b64decode | from_json)
+         | combine({'auths': {mirror_endpoint: {'auth': mirror_auth_b64, 'email': 'noreply@coco.rig.local'}}}, recursive=true)
+         | to_nice_json }}
+    dest: /root/.docker/config.json
+    owner: root
+    group: root
+    mode: "0600"
+  become: true
+  no_log: true

@@ -1,0 +1,32 @@
+# Host OUTPUT policy for the RHCOS node (executable rules match the MachineConfig payload).
+#
+# These rules allow configured private/cluster ranges and filter host OUTPUT. They do not
+# establish Trustee pod or guest isolation. Allowing only the bastion would break required
+# OVN-Kubernetes link-local / 100.64 and cluster/service traffic; verify the actual allowlist.
+#
+# Before relying on isolation, inspect effective rules and attribute fresh public-connection
+# denials to enforcement from the host, Trustee and relevant workload/guest contexts.
+# DNS/TLS/routing failures alone are insufficient. Verify private mirror TLS, DNS/NTP and
+# cluster health; repeat after reinstall/reboot. See docs/validation.md.
+# Tighten private ranges only after confirming all required machine-network traffic.
+table inet airgap {
+  chain output {
+    type filter hook output priority 0; policy drop;
+
+    oifname "lo" accept
+    ct state established,related accept
+
+    # cluster + host + VLAN private ranges (covers clusterNetwork 10.128/14, serviceNetwork
+    # 172.30/16, machineNetwork 192.168.x, the rig VLAN 192.168.66/24, OVN link-local + 100.64).
+    ip daddr {
+      10.0.0.0/8,
+      172.16.0.0/12,
+      192.168.0.0/16,
+      169.254.0.0/16,
+      100.64.0.0/10
+    } accept
+    ip6 daddr fe80::/10 accept
+
+    # everything else (the public internet) falls through to the drop policy.
+  }
+}

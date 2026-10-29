@@ -1,0 +1,130 @@
+---
+#
+# oc-mirror v2 push to the local mirror registry. The v2 workspace is CACHEABLE so each retry
+# resumes, but oc-mirror aborts the whole run on the first failed blob — so we wrap it in a
+# retry loop (retries/delay). MUST `unset REGISTRY_AUTH_FILE` (v2 embeds a distribution registry
+# that hijacks REGISTRY_* -> panic). Runs as root (reads /root/.docker/config.json). Run AFTER
+# the helper network and registry bootstrap have passed their checks.
+
+- name: Stage the imageset-config on the bastion
+  ansible.builtin.copy:
+    src: "{{ imageset_config_absolute }}"
+    dest: "{{ ansible_facts['env']['HOME'] }}/imageset-config.yaml"
+    mode: "0644"
+  register: imageset_copy
+
+- name: Ensure the oc-mirror v2 workspace dir exists
+  ansible.builtin.file:
+    path: "{{ mirror_workspace }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Hash the exact mirror inputs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ ansible_facts['env']['HOME'] }}/imageset-config.yaml"
+    - "{{ local_bin }}/oc-mirror"
+  register: mirror_inputs
+  become: true
+
+- name: Define the mirror completion identity
+  ansible.builtin.set_fact:
+    mirror_identity: >-
+      {{ {'imageset_sha256': mirror_inputs.results[0].stat.checksum,
+          'tool_sha256': mirror_inputs.results[1].stat.checksum,
+          'destination': mirror_endpoint, 'ocp_version': ocp_version,
+          'release_image': ocp_release_image | default('')} | to_json }}
+
+- name: Check for a prior mirror completion record
+  ansible.builtin.stat:
+    path: "{{ mirror_root }}/OCMIRROR_DONE"
+  register: ocmirror_done
+  become: true
+
+- name: Read prior mirror completion identity
+  ansible.builtin.slurp:
+    src: "{{ mirror_root }}/OCMIRROR_DONE"
+  register: mirror_done_content
+  become: true
+  when: ocmirror_done.stat.exists
+
+- name: Check generated cluster resources before reusing completion
+  ansible.builtin.find:
+    paths: "{{ mirror_workspace }}/working-dir/cluster-resources"
+    patterns: "*.yaml"
+    file_type: file
+  register: prior_mirror_resources
+  become: true
+
+- name: Determine whether this mirror run is complete
+  ansible.builtin.set_fact:
+    mirror_push_required: >-
+      {{ (force_mirror_push | default(false) | bool)
+         or (mirror_done_content.content | default('') | b64decode | trim) != mirror_identity
+         or (prior_mirror_resources.matched | default(0) | int) == 0 }}
+
+- name: Clear completion and stale generated resources before a new mirror run
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - "{{ mirror_root }}/OCMIRROR_DONE"
+    - "{{ mirror_root }}/OCMIRROR_FAILED"
+    - "{{ mirror_workspace }}/working-dir/cluster-resources"
+  when: mirror_push_required | bool
+
+# The retry loop. REGISTRY_AUTH_FILE must be truly UNSET: Ansible `environment:` cannot unset
+# a variable — `REGISTRY_AUTH_FILE: ""` exports it EMPTY, and oc-mirror's embedded distribution
+# v3 registry maps any set REGISTRY_AUTH_FILE (even empty) to auth type "file" and panics
+# ("no access controller registered with name: file"). Hence the `env -u` prefix. Proven on
+# metal 2026-07-22: empty -> panic, unset -> clean run.
+# Each attempt resumes the cacheable workspace; retries: 8 covers the flaky-blob failure mode.
+- name: Run oc-mirror v2 push (with resume-on-retry)
+  ansible.builtin.command:
+    cmd: >-
+      env -u REGISTRY_AUTH_FILE
+      oc-mirror --v2 -c {{ ansible_facts['env']['HOME'] }}/imageset-config.yaml
+      --workspace file://{{ mirror_workspace }}
+      docker://{{ mirror_endpoint }}
+  become: true
+  environment:
+    PATH: "{{ tool_path }}"
+  register: ocmirror_run
+  until: ocmirror_run.rc == 0
+  retries: 8
+  delay: 30
+  changed_when: ocmirror_run.rc == 0
+  when: mirror_push_required | bool
+
+- name: Find the generated cluster resources
+  ansible.builtin.find:
+    paths: "{{ mirror_workspace }}/working-dir/cluster-resources"
+    patterns: "*.yaml"
+    file_type: file
+  become: true
+  register: ocmirror_resources
+
+- name: Require cluster resources before recording mirror success
+  ansible.builtin.assert:
+    that: (ocmirror_resources.matched | default(0) | int) > 0
+    fail_msg: "oc-mirror emitted no cluster-resources; the mirror is not complete. Check {{ mirror_workspace }}."
+
+- name: Record successful mirror input identity atomically
+  ansible.builtin.copy:
+    content: "{{ mirror_identity }}\n"
+    dest: "{{ mirror_root }}/OCMIRROR_DONE"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: mirror_push_required | bool
+
+- name: Report the verified mirror resources
+  ansible.builtin.debug:
+    msg: "{{ ocmirror_resources.matched }} cluster-resource files match this mirror run in {{ mirror_workspace }}/working-dir/cluster-resources."

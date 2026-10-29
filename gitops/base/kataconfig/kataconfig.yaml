@@ -1,0 +1,13 @@
+# Bare-metal confidential containers. The selected overlay scopes eligible workers.
+# Feature gates must reconcile before this CR; rollout can reboot selected nodes.
+# RuntimeClass handler must be checked against the selected TEE profile.
+apiVersion: kataconfiguration.openshift.io/v1
+kind: KataConfig
+metadata:
+  name: cluster-kataconfig
+spec:
+  enablePeerPods: false
+  checkNodeEligibility: false   # profile selectors still determine target nodes; validate actual eligibility separately.
+  # kataConfigPoolSelector: # FILL (per overlay): on multi-node, pin Kata to the SNP worker
+  #   matchLabels:          #   pool so plain workers are untouched. SNO collapses to one node,
+  #     node-role.kubernetes.io/kata-oc: ""  #   so the base leaves this unset.

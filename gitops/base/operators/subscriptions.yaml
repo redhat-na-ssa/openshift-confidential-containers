@@ -1,0 +1,51 @@
+# Target candidates from install/release-manifest.json. Verify catalog CSVs first.
+# startingCSV is not an upgrade lock; manual InstallPlan approval is intentional.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: nfd
+  namespace: openshift-nfd
+spec:
+  channel: stable
+  name: nfd
+  source: cs-redhat-operator-index-v4-20
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Manual
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: openshift-cert-manager-operator
+  namespace: cert-manager-operator
+spec:
+  channel: stable-v1
+  name: openshift-cert-manager-operator
+  source: cs-redhat-operator-index-v4-20
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Manual
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: sandboxed-containers-operator
+  namespace: openshift-sandboxed-containers-operator
+spec:
+  channel: stable
+  name: sandboxed-containers-operator
+  source: cs-redhat-operator-index-v4-20
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Manual
+  startingCSV: sandboxed-containers-operator.v1.13.1
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: trustee-operator
+  namespace: trustee-operator-system
+spec:
+  channel: stable
+  name: trustee-operator
+  source: cs-redhat-operator-index-v4-20
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Manual
+  startingCSV: trustee-operator.v1.2.1

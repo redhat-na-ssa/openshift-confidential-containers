@@ -1,0 +1,69 @@
+---
+# Example rig file, for servers that make order-rig did not order. On Cherry
+# Servers, make order-rig writes the complete file for you (docs/quickstart.md).
+# Otherwise copy this outside the checkout, fill in every REPLACE value and pass
+# it to Ansible:
+#
+#   cp ansible/rig.example.yml "$COCO_STATE_DIR/rig.yml"
+#   bash ansible/up.sh --mode fresh-install
+#
+# Read every value from the servers you were actually given; never copy values
+# from an old rig. docs/cherry-servers.md says where each one comes from, and
+# group_vars/all.yml documents the defaults you can override.
+
+# ---- Provider values -----------------------------------------------------
+bastion_ansible_host: "REPLACE_WITH_HELPER_PUBLIC_IP"
+bastion_public_ipv4_override: "REPLACE_WITH_HELPER_PUBLIC_IP"
+node_server_id: "REPLACE_WITH_PROVIDER_SERVER_ID"
+node_provider_hostname: "REPLACE_WITH_PROVIDER_HOSTNAME"
+node_provider_project_id: "REPLACE_WITH_PROVIDER_PROJECT_ID"
+# Private addresses Cherry assigned, and their network.
+node_vlan_ip: "REPLACE_WITH_NODE_PRIVATE_IP"
+bastion_vlan_ip: "REPLACE_WITH_HELPER_PRIVATE_IP"
+machine_network: "REPLACE_WITH_PRIVATE_NETWORK_CIDR"
+vlan_cidr: "REPLACE_WITH_PRIVATE_NETWORK_CIDR"
+vlan_prefix: 24
+# The VLAN tag seen on the wire. This is not the provider's VLAN object ID.
+vlan_vid_override: "REPLACE_WITH_VLAN_TAG"
+
+# ---- Helper (bastion) access ---------------------------------------------
+# root on Cherry Servers images.
+bastion_ssh_user: "REPLACE_WITH_HELPER_SSH_USER"
+bastion_ssh_key: "/path/outside/checkout/helper-ssh-key"
+# Interface names: VLAN_IFACE and PUBLIC_IFACE in the helper's /etc/rig-network.env.
+bastion_private_if: "REPLACE_WITH_HELPER_VLAN_INTERFACE"
+bastion_external_if: "REPLACE_WITH_HELPER_PUBLIC_INTERFACE"
+
+# ---- AMD node, as delivered by the provider ------------------------------
+# SSH into the provider's original OS, used for discovery and the private-link check.
+# root on Cherry Servers images.
+raw_node_ssh_user: "REPLACE_WITH_NODE_SSH_USER"
+raw_node_ssh_key: "/path/outside/checkout/node-ssh-key"
+# known_hosts file that pins the helper and node host keys.
+private_link_known_hosts: "/path/outside/checkout/known_hosts"
+
+# Bonded private network. Read names and permanent MACs on the node itself.
+node_parent_if: "bond0"
+node_parent_mac: "REPLACE_WITH_BOND_MAC"
+node_bond_ports:
+  - name: "REPLACE_WITH_FIRST_NIC"
+    mac: "REPLACE_WITH_FIRST_NIC_MAC"
+  - name: "REPLACE_WITH_SECOND_NIC"
+    mac: "REPLACE_WITH_SECOND_NIC_MAC"
+# Leave both empty when the node has no separate public NIC.
+node_external_if: ""
+node_external_mac: ""
+
+# Installation disk. Confirm its serial on the node first: this disk is erased.
+node_root_device: "/dev/disk/by-path/REPLACE_WITH_STABLE_DISK_PATH"
+
+# ---- Credentials (files outside the checkout) ----------------------------
+pull_secret_src: "/path/outside/checkout/pull-secret.json"
+node_ssh_pubkey_src: "/path/outside/checkout/node-ssh-key.pub"
+# Generate a fresh value for each install with: openssl rand -hex 16
+boot_artifacts_token: "REPLACE_WITH_openssl_rand_hex_16"
+
+# ---- Optional overrides ---------------------------------------------------
+# cluster_name: "sno-coco"
+# base_domain: "coco.lab.local"
+# public_console_enabled: false
